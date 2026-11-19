@@ -22,7 +22,7 @@ from .media_ops import make_contact_sheet, shrink_image
 from .probe import IMAGE_EXTS, VIDEO_EXTS, classify_media
 
 _QUOTA_PATTERNS = re.compile(
-    r"(429|quota|rate[ _-]?limit|limit reached|usage limit|exhausted|too many requests|credit|billing|resource_exhausted)",
+    r"(429|quota|rate[ _-]?limit|limit reached|usage limit|weekly limit|daily limit|exhausted|too many requests|credit|billing|resource_exhausted)",
     re.IGNORECASE,
 )
 _CAPACITY_PATTERNS = re.compile(
@@ -79,7 +79,7 @@ def _build_worker_command(
     files: List[Path],
     prompt: str,
     model: Optional[str] = None,
-) -> List[str]:
+) -> Tuple[List[str], Optional[str]]:
     file_list = "\n".join(f"- {f}" for f in files)
     full_prompt = (
         "You are a stateless media inspection worker. Inspect the following local file(s) "
@@ -91,13 +91,13 @@ def _build_worker_command(
     dirs = sorted({str(f.parent) for f in files})
 
     if backend == "agy":
-        cmd = ["agy", "-p", "--disable-slash-commands", "--output-format", "text", "--dangerously-skip-permissions"]
+        cmd = ["agy", "--disable-slash-commands", "--output-format", "text", "--dangerously-skip-permissions"]
         if model:
             cmd += ["--model", model]
         for d in dirs:
             cmd += ["--add-dir", d]
-        cmd.append(full_prompt)
-        return cmd
+        cmd += ["-p", full_prompt]
+        return cmd, None
 
     if backend == "claude":
         cmd = ["claude", "-p", "--allowedTools", "Read"]
@@ -105,18 +105,19 @@ def _build_worker_command(
             cmd += ["--model", model]
         for d in dirs:
             cmd += ["--add-dir", d]
-        cmd.append(full_prompt)
-        return cmd
+        # Pass prompt via stdin so variadic --add-dir never consumes it
+        return cmd, full_prompt
 
     if backend == "codex":
-        cmd = ["codex", "exec"]
+        cmd = ["codex", "exec", "--skip-git-repo-check"]
         if model:
             cmd += ["-m", model]
         for f in files:
             if classify_media(f) == "image":
                 cmd += ["-i", str(f)]
-        cmd.append(full_prompt)
-        return cmd
+        # '-' reads prompt cleanly from stdin without colliding with -i
+        cmd.append("-")
+        return cmd, full_prompt
 
     if backend == "opencode":
         cmd = ["opencode", "run"]
@@ -125,14 +126,26 @@ def _build_worker_command(
         for f in files:
             cmd += ["-f", str(f)]
         cmd.append(full_prompt)
-        return cmd
+        return cmd, None
 
     raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _default_runner(cmd: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[int, str, str]:
+def _default_runner(
+    cmd: List[str],
+    timeout_s: int,
+    env: Dict[str, str],
+    stdin_text: Optional[str] = None,
+) -> Tuple[int, str, str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env)
+        proc = subprocess.run(
+            cmd,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+        )
         return proc.returncode, proc.stdout or "", proc.stderr or ""
     except subprocess.TimeoutExpired:
         return 124, "", f"Worker timed out after {timeout_s}s"
@@ -231,9 +244,12 @@ def inspect_media(
             )
             continue
 
-        cmd = _build_worker_command(target.backend, prepared, prompt, model=target.model or None)
+        cmd, stdin_text = _build_worker_command(target.backend, prepared, prompt, model=target.model or None)
         t0 = time.monotonic()
-        rc, stdout, stderr = exec_fn(cmd, timeout_s, env)
+        if runner is not None:
+            rc, stdout, stderr = runner(cmd, timeout_s, env)
+        else:
+            rc, stdout, stderr = _default_runner(cmd, timeout_s, env, stdin_text)
         elapsed = round(time.monotonic() - t0, 2)
 
         if rc == 0 and stdout.strip():

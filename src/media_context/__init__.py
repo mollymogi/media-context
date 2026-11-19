@@ -1,3 +1,3 @@
 """media-context (mctx): Keep heavy media out of coding agent context windows."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
