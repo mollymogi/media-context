@@ -133,6 +133,52 @@ class TestMediaContext(unittest.TestCase):
         self.assertGreaterEqual(stats["total_events"], 1)
         self.assertGreater(stats["saved_tokens_est"], 0)
 
+    def test_inspector_auto_fallback_and_cooldown(self) -> None:
+        from media_context.inspector import inspect_media
+
+        os.environ["MCTX_FALLBACK_CHAIN"] = "agy:gemini-4-hydrogen-high,claude:sonnet,codex"
+        calls: list[str] = []
+
+        def fake_runner(cmd: list[str], timeout_s: int, env: dict[str, str]):
+            self.assertEqual(env.get("MCTX_BYPASS"), "1")
+            calls.append(cmd[0])
+            if cmd[0] == "agy":
+                return 1, "", "UNAVAILABLE (code 503): No capacity available for model gemini-4-hydrogen-high"
+            if cmd[0] == "claude":
+                return 0, "Frame looks clean, no artifacts detected.", ""
+            return 1, "", "unexpected"
+
+        try:
+            res = inspect_media(
+                [self.imgs[0]],
+                "Check image quality",
+                store=self.store,
+                runner=fake_runner,
+            )
+            self.assertEqual(res["backend"], "claude")
+            self.assertEqual(res["model"], "sonnet")
+            self.assertTrue(res["fallback_used"])
+            self.assertIn("agy:gemini-4-hydrogen-high", res["fallback_notice"])
+            self.assertEqual(calls, ["agy", "claude"])
+
+            # Verify agy target is now in cooldown so next uncached call skips it directly
+            cds = self.store.list_active_cooldowns()
+            self.assertEqual(len(cds), 1)
+            self.assertEqual(cds[0]["target"], "agy:gemini-4-hydrogen-high")
+
+            calls.clear()
+            res2 = inspect_media(
+                [self.imgs[1]],
+                "Check second image",
+                store=self.store,
+                runner=fake_runner,
+            )
+            self.assertEqual(res2["backend"], "claude")
+            self.assertEqual(calls, ["claude"])  # agy skipped due to cooldown
+            self.assertTrue(res2["fallback_used"])
+        finally:
+            os.environ.pop("MCTX_FALLBACK_CHAIN", None)
+
 
 if __name__ == "__main__":
     unittest.main()

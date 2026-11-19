@@ -122,10 +122,43 @@ mctx hook config claude --mode shrink
 
 ---
 
+## Default Models & Automatic Quota/Capacity Fallback
+
+`mctx inspect` supports an ordered **fallback chain** with automatic cooldown so your workflow never stalls when a model hits quota (`429`), capacity limits (`503 No capacity`), or auth expiry (`401`):
+
+```bash
+# Generate ~/.config/media-context/config.json
+mctx config init
+mctx config show
+```
+
+Example `~/.config/media-context/config.json`:
+
+```json
+{
+  "cooldown_seconds": 300,
+  "fallback_chain": [
+    {"backend": "agy", "model": "gemini-4-neon-medium"},
+    {"backend": "claude", "model": "sonnet"},
+    {"backend": "codex", "model": ""},
+    {"backend": "opencode", "model": ""}
+  ]
+}
+```
+
+When the primary model hits quota or `503 No capacity`, `mctx`:
+1. Marks that `(backend, model)` in a local SQLite cooldown window (default 5 min),
+2. Automatically switches to the next available target in the chain,
+3. Emits a clear fallback notice (`[mctx:fallback] ...`) in both CLI and MCP output.
+
+Run `mctx config reset-cooldown` to clear cooldowns immediately.
+
 ## Environment Variables
 
-- `MCTX_BACKEND`: Default worker CLI (`auto`, `agy`, `claude`, `codex`, `opencode`).
-- `MCTX_MODEL`: Optional model override passed to the worker CLI.
+- `MCTX_FALLBACK_CHAIN`: Comma-separated override (e.g. `agy:gemini-4-neon-medium,claude:sonnet,codex`).
+- `MCTX_CONFIG`: Custom config JSON path (default: `~/.config/media-context/config.json`).
+- `MCTX_COOLDOWN_SECONDS`: Cooldown duration after quota/capacity errors (default: `300`).
+- `MCTX_BACKEND` / `MCTX_MODEL`: Single backend/model override.
 - `MCTX_HOME`: Cache & SQLite directory (default: `~/.cache/media-context`).
 - `MCTX_BYPASS=1`: Bypass the `PreToolUse` hook (automatically set inside `mctx inspect` workers).
 

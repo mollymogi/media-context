@@ -10,8 +10,16 @@ from typing import List, Optional
 
 from . import __version__
 from .cache import CacheStore, get_data_dir
+from .config import (
+    SUPPORTED_BACKENDS,
+    detect_available_backends,
+    get_config_path,
+    get_cooldown_seconds,
+    init_default_config,
+    resolve_fallback_chain,
+)
 from .hook import render_hook_config, run_hook_stdio
-from .inspector import SUPPORTED_BACKENDS, detect_available_backends, inspect_media
+from .inspector import inspect_media
 from .mcp_server import serve_stdio
 from .media_ops import make_contact_sheet, shrink_image
 from .probe import probe_media
@@ -23,13 +31,20 @@ def _print_json(data: object) -> None:
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
+    store = CacheStore()
+    chain = resolve_fallback_chain()
     info = {
         "version": __version__,
         "data_dir": str(get_data_dir()),
+        "config_path": str(get_config_path()),
+        "config_exists": get_config_path().exists(),
         "ffmpeg": shutil.which("ffmpeg") or "MISSING",
         "ffprobe": shutil.which("ffprobe") or "MISSING",
         "transcribe_engine": detect_transcribe_engine() or "NONE (optional)",
         "subscription_backends": detect_available_backends(),
+        "fallback_chain": [t.to_dict() for t in chain],
+        "cooldown_seconds": get_cooldown_seconds(),
+        "active_cooldowns": store.list_active_cooldowns(),
         "supported_backends": list(SUPPORTED_BACKENDS),
     }
     _print_json(info)
@@ -80,7 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_ins.add_argument("--model", default=None, help="Optional model override for backend CLI")
     p_ins.add_argument("--grid", default="3x3", help="Contact sheet grid for video/multi-images")
     p_ins.add_argument("--no-cache", action="store_true", help="Bypass SQLite cache")
+    p_ins.add_argument("--no-fallback", action="store_true", help="Disable automatic fallback chain")
     p_ins.add_argument("--json", action="store_true", dest="as_json", help="Print full JSON metadata")
+
+    # config
+    p_cfg = sub.add_parser("config", help="Manage default model fallback chain and cooldowns")
+    cfg_sub = p_cfg.add_subparsers(dest="cfg_cmd", required=True)
+    cfg_sub.add_parser("show", help="Show active fallback chain and cooldowns")
+    p_cinit = cfg_sub.add_parser("init", help="Write default ~/.config/media-context/config.json")
+    p_cinit.add_argument("--force", action="store_true", help="Overwrite existing config file")
+    cfg_sub.add_parser("reset-cooldown", help="Clear all active backend cooldowns")
 
     # mcp
     sub.add_parser("mcp", help="Start stdio JSON-RPC MCP server")
@@ -149,13 +173,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                 model=args.model,
                 grid=args.grid,
                 no_cache=args.no_cache,
+                no_fallback=args.no_fallback,
                 store=store,
             )
             if args.as_json:
                 _print_json(res)
             else:
-                tag = "cached" if res.get("cached") else f"{res['backend']} {res['elapsed_s']}s"
+                if res.get("fallback_notice"):
+                    print(f"[mctx:fallback] {res['fallback_notice']}", file=sys.stderr)
+                tag = "cached" if res.get("cached") else f"{res.get('target', res['backend'])} {res['elapsed_s']}s"
                 print(f"[mctx:{tag}]\n{res['result']}")
+            return 0
+        if args.command == "config":
+            if args.cfg_cmd == "show":
+                _print_json(
+                    {
+                        "config_path": str(get_config_path()),
+                        "exists": get_config_path().exists(),
+                        "cooldown_seconds": get_cooldown_seconds(),
+                        "fallback_chain": [t.to_dict() for t in resolve_fallback_chain()],
+                        "active_cooldowns": store.list_active_cooldowns(),
+                    }
+                )
+            elif args.cfg_cmd == "init":
+                path = init_default_config(force=args.force)
+                _print_json({"config_path": str(path), "initialized": True})
+            elif args.cfg_cmd == "reset-cooldown":
+                cleared = store.clear_cooldowns()
+                _print_json({"cleared_cooldowns": cleared})
             return 0
         if args.command == "mcp":
             return serve_stdio()

@@ -69,3 +69,34 @@ MCP 通用配置（Antigravity / Claude Code / Codex / OpenCode）：
 mctx hook config antigravity --mode block
 mctx hook config claude --mode block
 ```
+
+---
+
+## 默认模型与额度/容量自动降级链
+
+当默认模型遇到**额度耗尽（`429` / `quota`）**、**服务端无容量（`503 No capacity`）**或**登录失效（`401`）**时，`mctx inspect` 会自动按降级链切换到下一个可用订阅 CLI，并在返回结果中给出明确降级提示，同时将失败模型放入本地冷却期（默认 5 分钟）避免重复卡顿：
+
+```bash
+# 生成并查看 ~/.config/media-context/config.json
+mctx config init
+mctx config show
+
+# 清除冷却状态
+mctx config reset-cooldown
+```
+
+示例 `~/.config/media-context/config.json`：
+
+```json
+{
+  "cooldown_seconds": 300,
+  "fallback_chain": [
+    {"backend": "agy", "model": "gemini-4-neon-medium"},
+    {"backend": "claude", "model": "sonnet"},
+    {"backend": "codex", "model": ""},
+    {"backend": "opencode", "model": ""}
+  ]
+}
+```
+
+也可以通过环境变量临时指定：`MCTX_FALLBACK_CHAIN="agy:gemini-4-neon-medium,claude:sonnet,codex"`。

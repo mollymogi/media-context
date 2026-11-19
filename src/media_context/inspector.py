@@ -1,42 +1,51 @@
-"""Stateless multimodal inspector backed by existing subscription CLIs (zero extra API cost)."""
+"""Stateless multimodal inspector backed by existing subscription CLIs with auto-fallback."""
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cache import CacheStore, estimate_media_tokens, sha256_files
+from .config import (
+    SUPPORTED_BACKENDS,
+    FallbackTarget,
+    detect_available_backends,
+    get_cooldown_seconds,
+    resolve_fallback_chain,
+)
 from .media_ops import make_contact_sheet, shrink_image
 from .probe import IMAGE_EXTS, VIDEO_EXTS, classify_media
 
-SUPPORTED_BACKENDS = ("agy", "claude", "codex", "opencode")
+_QUOTA_PATTERNS = re.compile(
+    r"(429|quota|rate[ _-]?limit|limit reached|usage limit|exhausted|too many requests|credit|billing|resource_exhausted)",
+    re.IGNORECASE,
+)
+_CAPACITY_PATTERNS = re.compile(
+    r"(503|no capacity|overloaded|unavailable|service unavailable|server overloaded|temporarily unavailable|502|504)",
+    re.IGNORECASE,
+)
+_AUTH_PATTERNS = re.compile(
+    r"(401|unauthenticated|not logged in|invalid authentication|token expired|login required)",
+    re.IGNORECASE,
+)
 
 
-def detect_available_backends() -> List[str]:
-    return [b for b in SUPPORTED_BACKENDS if shutil.which(b)]
-
-
-def resolve_backend(preferred: Optional[str] = None) -> str:
-    env_backend = os.environ.get("MCTX_BACKEND", "").strip().lower()
-    choice = (preferred or env_backend or "auto").lower()
-    if choice != "auto":
-        if choice not in SUPPORTED_BACKENDS:
-            raise ValueError(f"Unsupported backend '{choice}'. Choose from: {', '.join(SUPPORTED_BACKENDS)}")
-        if not shutil.which(choice):
-            raise RuntimeError(f"Requested backend '{choice}' is not installed in PATH.")
-        return choice
-
-    avail = detect_available_backends()
-    if not avail:
-        raise RuntimeError(
-            "No supported subscription CLI found in PATH. "
-            "Install one of: agy, claude, codex, opencode."
-        )
-    return avail[0]
+def classify_failure(error_text: str) -> Tuple[str, bool]:
+    """Classify worker failure into (category, should_fallback)."""
+    if _QUOTA_PATTERNS.search(error_text):
+        return "quota_exhausted", True
+    if _CAPACITY_PATTERNS.search(error_text):
+        return "capacity_unavailable", True
+    if _AUTH_PATTERNS.search(error_text):
+        return "auth_error", True
+    if "timed out" in error_text.lower() or "timeout" in error_text.lower():
+        return "timeout", True
+    return "runtime_error", True
 
 
 def _prepare_visual_inputs(paths: List[Path], grid: str, max_side: int) -> List[Path]:
@@ -121,6 +130,14 @@ def _build_worker_command(
     raise ValueError(f"Unsupported backend: {backend}")
 
 
+def _default_runner(cmd: List[str], timeout_s: int, env: Dict[str, str]) -> Tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env)
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
+    except subprocess.TimeoutExpired:
+        return 124, "", f"Worker timed out after {timeout_s}s"
+
+
 def inspect_media(
     inputs: List[str | Path],
     prompt: str,
@@ -130,10 +147,12 @@ def inspect_media(
     grid: str = "3x3",
     max_side: int = 1024,
     no_cache: bool = False,
+    no_fallback: bool = False,
     timeout_s: int = 180,
     store: Optional[CacheStore] = None,
+    runner: Optional[Callable[[List[str], int, Dict[str, str]], Tuple[int, str, str]]] = None,
 ) -> Dict[str, Any]:
-    """Run an isolated, stateless inspection via an existing subscription CLI and return concise text."""
+    """Run an isolated, stateless inspection via subscription CLI with automatic quota/capacity fallback."""
     resolved: List[Path] = []
     for raw in inputs:
         p = Path(raw).expanduser().resolve()
@@ -147,69 +166,128 @@ def inspect_media(
     if not resolved:
         raise ValueError("No media files found to inspect.")
 
-    chosen_backend = resolve_backend(backend)
-    chosen_model = model or os.environ.get("MCTX_MODEL", "")
+    chain = resolve_fallback_chain(preferred_backend=backend, preferred_model=model)
+    # Filter to installed CLIs unless a custom test runner is supplied
+    if runner is None:
+        chain = [t for t in chain if shutil.which(t.backend)]
+    if no_fallback and chain:
+        chain = chain[:1]
+    if not chain:
+        raise RuntimeError(
+            "No supported subscription CLI found in PATH. "
+            f"Install one of: {', '.join(SUPPORTED_BACKENDS)}."
+        )
+
     cache = store or CacheStore()
     fhash = sha256_files(resolved)
-    cache_key = cache.make_key(fhash, chosen_backend, chosen_model, prompt)
-
     src_bytes = sum(p.stat().st_size for p in resolved)
     raw_tokens = sum(estimate_media_tokens(p) for p in resolved)
 
+    # Check cache across active chain targets (primary first)
     if not no_cache:
-        hit = cache.get_inspect(cache_key)
-        if hit:
-            out_bytes = len(hit["result"].encode("utf-8"))
+        for t in chain:
+            ck = cache.make_key(fhash, t.backend, t.model, prompt)
+            hit = cache.get_inspect(ck)
+            if hit:
+                out_bytes = len(hit["result"].encode("utf-8"))
+                cache.record_saving(
+                    "inspect_cache_hit",
+                    src_bytes,
+                    out_bytes,
+                    max(0, raw_tokens - max(1, out_bytes // 4)),
+                    f"{len(resolved)} file(s)",
+                )
+                return {
+                    "backend": hit["backend"],
+                    "model": hit["model"] or "default",
+                    "cached": True,
+                    "cache_hits": hit["hits"],
+                    "elapsed_s": 0.0,
+                    "fallback_used": False,
+                    "fallback_notice": "",
+                    "result": hit["result"],
+                    "source_count": len(resolved),
+                }
+
+    prepared = _prepare_visual_inputs(resolved, grid=grid, max_side=max_side)
+    env = os.environ.copy()
+    env["MCTX_BYPASS"] = "1"
+    exec_fn = runner or _default_runner
+    cooldown_s = get_cooldown_seconds()
+
+    attempts: List[Dict[str, Any]] = []
+    primary = chain[0]
+
+    for idx, target in enumerate(chain):
+        cd = cache.get_cooldown(target.key)
+        if cd and len(chain) > 1:
+            attempts.append(
+                {
+                    "target": target.key,
+                    "status": "skipped_cooldown",
+                    "reason": cd["reason"],
+                    "remaining_s": cd["remaining_s"],
+                }
+            )
+            continue
+
+        cmd = _build_worker_command(target.backend, prepared, prompt, model=target.model or None)
+        t0 = time.monotonic()
+        rc, stdout, stderr = exec_fn(cmd, timeout_s, env)
+        elapsed = round(time.monotonic() - t0, 2)
+
+        if rc == 0 and stdout.strip():
+            answer = stdout.strip()
+            ck = cache.make_key(fhash, target.backend, target.model, prompt)
+            cache.put_inspect(ck, fhash, target.backend, target.model, prompt, answer)
+
+            out_bytes = len(answer.encode("utf-8"))
             cache.record_saving(
-                "inspect_cache_hit",
+                "inspect",
                 src_bytes,
                 out_bytes,
                 max(0, raw_tokens - max(1, out_bytes // 4)),
-                f"{len(resolved)} file(s)",
+                f"{target.key} ({len(resolved)} file(s))",
             )
+
+            fallback_used = target.key != primary.key
+            notice = ""
+            if fallback_used:
+                prev_reasons = "; ".join(f"{a['target']} ({a['reason']})" for a in attempts)
+                notice = f"Fallback triggered: {prev_reasons} -> switched to {target.key}"
+
             return {
-                "backend": hit["backend"],
-                "model": hit["model"],
-                "cached": True,
-                "cache_hits": hit["hits"],
-                "elapsed_s": 0.0,
-                "result": hit["result"],
+                "backend": target.backend,
+                "model": target.model or "default",
+                "target": target.key,
+                "cached": False,
+                "elapsed_s": elapsed,
+                "fallback_used": fallback_used,
+                "fallback_notice": notice,
+                "attempts": attempts,
+                "prepared_files": [str(x) for x in prepared],
+                "result": answer,
                 "source_count": len(resolved),
             }
 
-    prepared = _prepare_visual_inputs(resolved, grid=grid, max_side=max_side)
-    cmd = _build_worker_command(chosen_backend, prepared, prompt, model=chosen_model or None)
+        err_msg = (stderr or stdout or f"exit {rc}").strip()
+        category, can_fallback = classify_failure(err_msg)
+        attempts.append(
+            {
+                "target": target.key,
+                "status": "failed",
+                "category": category,
+                "reason": f"{category}: {err_msg[:180]}",
+                "elapsed_s": elapsed,
+            }
+        )
+        if category in ("quota_exhausted", "capacity_unavailable", "auth_error"):
+            cache.set_cooldown(target.key, category, cooldown_s)
+        if not can_fallback or idx == len(chain) - 1:
+            break
 
-    env = os.environ.copy()
-    # Critical: prevent our own PreToolUse hook from blocking this stateless worker!
-    env["MCTX_BYPASS"] = "1"
-
-    t0 = time.monotonic()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env)
-    elapsed = round(time.monotonic() - t0, 2)
-
-    if proc.returncode != 0:
-        err_msg = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(f"Backend '{chosen_backend}' failed (exit {proc.returncode}): {err_msg[:500]}")
-
-    answer = (proc.stdout or "").strip()
-    cache.put_inspect(cache_key, fhash, chosen_backend, chosen_model, prompt, answer)
-
-    out_bytes = len(answer.encode("utf-8"))
-    cache.record_saving(
-        "inspect",
-        src_bytes,
-        out_bytes,
-        max(0, raw_tokens - max(1, out_bytes // 4)),
-        f"{chosen_backend} ({len(resolved)} file(s))",
+    summary = "; ".join(f"{a['target']} -> {a.get('reason', a['status'])}" for a in attempts)
+    raise RuntimeError(
+        f"All inspection backends exhausted/failed: {summary}. "
+        "Tip: check quota/login or run `mctx config reset-cooldown`."
     )
-
-    return {
-        "backend": chosen_backend,
-        "model": chosen_model or "default",
-        "cached": False,
-        "elapsed_s": elapsed,
-        "prepared_files": [str(x) for x in prepared],
-        "result": answer,
-        "source_count": len(resolved),
-    }

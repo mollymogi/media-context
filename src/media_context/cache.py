@@ -98,6 +98,11 @@ class CacheStore:
                     saved_tokens_est INTEGER NOT NULL DEFAULT 0,
                     detail TEXT DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS backend_cooldowns (
+                    target_key TEXT PRIMARY KEY,
+                    reason TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                );
                 """
             )
 
@@ -201,3 +206,46 @@ class CacheStore:
                 {"action": a, "count": c, "saved_tokens_est": t} for a, c, t in by_action
             ],
         }
+
+    def set_cooldown(self, target_key: str, reason: str, cooldown_s: int) -> None:
+        if cooldown_s <= 0:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO backend_cooldowns (target_key, reason, expires_at)
+                VALUES (?, ?, ?)
+                """,
+                (target_key, reason[:200], time.time() + cooldown_s),
+            )
+
+    def get_cooldown(self, target_key: str) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT reason, expires_at FROM backend_cooldowns WHERE target_key = ?",
+                (target_key,),
+            ).fetchone()
+            if not row:
+                return None
+            if row[1] <= now:
+                conn.execute("DELETE FROM backend_cooldowns WHERE target_key = ?", (target_key,))
+                return None
+            return {"target": target_key, "reason": row[0], "remaining_s": round(row[1] - now, 1)}
+
+    def list_active_cooldowns(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM backend_cooldowns WHERE expires_at <= ?", (now,))
+            rows = conn.execute(
+                "SELECT target_key, reason, expires_at FROM backend_cooldowns ORDER BY expires_at ASC"
+            ).fetchall()
+        return [
+            {"target": r[0], "reason": r[1], "remaining_s": round(r[2] - now, 1)}
+            for r in rows
+        ]
+
+    def clear_cooldowns(self) -> int:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM backend_cooldowns")
+            return cur.rowcount
