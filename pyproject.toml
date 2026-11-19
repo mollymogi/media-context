@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "media-context"
+version = "0.1.0"
+description = "Keep images, video, and audio out of your coding agent's context window — local-first, zero extra API cost, works across Antigravity, Claude Code, Codex, OpenCode, and any CLI."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = ["mcp", "claude-code", "codex", "antigravity", "opencode", "context", "multimodal", "ffmpeg", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = []
+
+[project.scripts]
+mctx = "media_context.cli:main"
+media-context = "media_context.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mollymogi/media-context"
+Repository = "https://github.com/mollymogi/media-context"
+Issues = "https://github.com/mollymogi/media-context/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
