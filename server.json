@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.mollymogi/media-context",
+  "title": "media-context (mctx)",
+  "description": "Keep images, video, and audio out of coding agent context windows — local FFmpeg probe/contact-sheet/shrink, offline Whisper transcription, and stateless subscription CLI inspection with automatic quota fallback.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/mollymogi/media-context",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/mollymogi/media-context",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "media-context",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "MCTX_FALLBACK_CHAIN",
+          "description": "Optional comma-separated fallback chain, e.g. agy:gemini-4-neon-medium,claude:sonnet,codex",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCTX_COOLDOWN_SECONDS",
+          "description": "Cooldown duration in seconds after quota/capacity failures (default: 300)",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
