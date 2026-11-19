@@ -1,9 +1,9 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.mollymogi/media-context",
   "title": "media-context (mctx)",
-  "description": "Keep images, video, and audio out of coding agent context windows — local FFmpeg probe/contact-sheet/shrink, offline Whisper transcription, and stateless subscription CLI inspection with automatic quota fallback.",
-  "version": "0.1.0",
+  "description": "Keep images, video & audio out of coding agent contexts — local FFmpeg + zero extra API cost.",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/mollymogi/media-context",
     "source": "github"
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "media-context",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

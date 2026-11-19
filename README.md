@@ -177,3 +177,5 @@ mctx hook config claude --mode shrink
 ## License
 
 MIT
+
+<!-- mcp-name: io.github.mollymogi/media-context -->

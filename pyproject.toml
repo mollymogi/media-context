@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "media-context"
-version = "0.1.0"
+version = "0.1.1"
 description = "Keep images, video, and audio out of your coding agent's context window — local-first, zero extra API cost, works across Antigravity, Claude Code, Codex, OpenCode, and any CLI."
 readme = "README.md"
 license = {text = "MIT"}
